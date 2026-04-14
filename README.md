@@ -110,7 +110,7 @@ npm run preview
 
 ## Deployment (Vercel)
 
-Live deployed link: [Add deployed link here]()
+Live deployed link: [cloud1406.vercel.app]()
 
 1. Push the repo to GitHub.
 2. Import project into Vercel.
