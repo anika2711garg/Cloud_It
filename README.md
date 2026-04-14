@@ -112,11 +112,6 @@ npm run preview
 
 Live deployed link: [cloud1406.vercel.app](https://cloud1406.vercel.app)
 
-If the root URL redirects based on auth state, use these direct links:
-
-- Login: [https://cloud1406.vercel.app/login](https://cloud1406.vercel.app/login)
-- Signup: [https://cloud1406.vercel.app/signup](https://cloud1406.vercel.app/signup)
-
 1. Push the repo to GitHub.
 2. Import project into Vercel.
 3. Set environment variables:
