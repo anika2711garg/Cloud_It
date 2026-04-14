@@ -56,6 +56,10 @@ function withTimeout(promise, fallbackValue, timeoutMs = FILES_TIMEOUT_MS) {
   ]);
 }
 
+function isUuid(value = "") {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 export default function FilesPage() {
   const { user, role, activeMode } = useAuth();
   const canManageFiles = role === "teacher" && activeMode === "teacher";
@@ -100,9 +104,11 @@ export default function FilesPage() {
     setLoading(!hasCachedPayload);
     setError("");
     try {
+      const safeSelectedFolderId = isUuid(selectedFolderId) ? selectedFolderId : undefined;
+
       const [foldersData, filesData, subjectsData] = await Promise.all([
         withTimeout(listFolders(user.id), []),
-        withTimeout(listFiles(user.id, selectedFolderId || undefined), []),
+        withTimeout(listFiles(user.id, safeSelectedFolderId), []),
         withTimeout(listSubjects(user.id), []),
       ]);
 
@@ -147,9 +153,10 @@ export default function FilesPage() {
     setSavingFolder(true);
     setError("");
     try {
+      const safeParentId = isUuid(newFolderParent) ? newFolderParent : null;
       const created = await createFolder({
         name: newFolderName.trim(),
-        parentId: newFolderParent || null,
+        parentId: safeParentId,
         userId: user.id,
       });
       setFolders((prev) => [...prev, created]);
@@ -189,10 +196,16 @@ export default function FilesPage() {
     setError("");
     startProgressAnimation();
     try {
+      const safeUploadFolderId = isUuid(uploadFolderId)
+        ? uploadFolderId
+        : isUuid(selectedFolderId)
+          ? selectedFolderId
+          : null;
+
       const createdFile = await uploadStudyFile({
         file: uploadFile,
         userId: user.id,
-        folderId: uploadFolderId || selectedFolderId || null,
+        folderId: safeUploadFolderId,
         subjectId: uploadSubjectId || null,
       });
 
