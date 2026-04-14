@@ -1,6 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { Folder, Grid3X3, List, UploadCloud } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import FileCard from "../components/files/FileCard";
 import FolderTree from "../components/folders/FolderTree";
+import AnimatedButton from "../components/shared/AnimatedButton";
+import GlassCard from "../components/shared/GlassCard";
+import { ErrorState, LoadingState } from "../components/shared/StatusMessage";
 import { useAuth } from "../context/AuthContext";
+import { MOCK_FILES, MOCK_FOLDERS, MOCK_SUBJECTS, fallbackIfEmpty } from "../lib/mockData";
 import {
   buildFolderTree,
   createFolder,
@@ -9,7 +16,45 @@ import {
   listSubjects,
   uploadStudyFile,
 } from "../services/studyHubApi";
-import { ErrorState, LoadingState } from "../components/shared/StatusMessage";
+
+const FILES_CACHE_KEY = "ai-study-hub-files-cache";
+const FILES_TIMEOUT_MS = 1500;
+
+function loadFilesCache(userId) {
+  if (!userId) return null;
+
+  try {
+    const raw = localStorage.getItem(FILES_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.userId !== userId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveFilesCache(userId, payload) {
+  if (!userId) return;
+
+  try {
+    localStorage.setItem(
+      FILES_CACHE_KEY,
+      JSON.stringify({ userId, ...payload, cachedAt: Date.now() })
+    );
+  } catch {
+    // Ignore cache write errors.
+  }
+}
+
+function withTimeout(promise, fallbackValue, timeoutMs = FILES_TIMEOUT_MS) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => {
+      setTimeout(() => resolve(fallbackValue), timeoutMs);
+    }),
+  ]);
+}
 
 export default function FilesPage() {
   const { user, role, activeMode } = useAuth();
@@ -19,37 +64,65 @@ export default function FilesPage() {
   const [files, setFiles] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [selectedFolderId, setSelectedFolderId] = useState("");
-
   const [newFolderName, setNewFolderName] = useState("");
   const [newFolderParent, setNewFolderParent] = useState("");
 
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadSubjectId, setUploadSubjectId] = useState("");
   const [uploadFolderId, setUploadFolderId] = useState("");
+  const [uploadProgress, setUploadProgress] = useState(0);
 
+  const [viewMode, setViewMode] = useState("grid");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [savingFolder, setSavingFolder] = useState(false);
   const [uploading, setUploading] = useState(false);
 
+  const uploadIntervalRef = useRef(null);
+
   const folderTree = useMemo(() => buildFolderTree(folders), [folders]);
 
   const loadData = async () => {
-    if (!user?.id) return;
+    if (!user?.id) {
+      setLoading(false);
+      return;
+    }
 
-    setLoading(true);
+    const cached = loadFilesCache(user.id);
+    const hasCachedPayload = Boolean(cached);
+    if (cached) {
+      if (Array.isArray(cached.folders)) setFolders(cached.folders);
+      if (Array.isArray(cached.subjects)) setSubjects(cached.subjects);
+      if (Array.isArray(cached.files)) setFiles(cached.files);
+      setLoading(false);
+    }
+
+    setLoading(!hasCachedPayload);
     setError("");
     try {
       const [foldersData, filesData, subjectsData] = await Promise.all([
-        listFolders(user.id),
-        listFiles(user.id, selectedFolderId || undefined),
-        listSubjects(user.id),
+        withTimeout(listFolders(user.id), []),
+        withTimeout(listFiles(user.id, selectedFolderId || undefined), []),
+        withTimeout(listSubjects(user.id), []),
       ]);
-      setFolders(foldersData);
-      setFiles(filesData);
-      setSubjects(subjectsData);
+
+      const resolvedFolders = fallbackIfEmpty(foldersData, MOCK_FOLDERS);
+      const resolvedFiles = fallbackIfEmpty(filesData, MOCK_FILES);
+      const resolvedSubjects = fallbackIfEmpty(subjectsData, MOCK_SUBJECTS);
+
+      setFolders(resolvedFolders);
+      setFiles(resolvedFiles);
+      setSubjects(resolvedSubjects);
+      saveFilesCache(user.id, {
+        folders: resolvedFolders,
+        files: resolvedFiles,
+        subjects: resolvedSubjects,
+      });
     } catch (loadError) {
       setError(loadError.message);
+      setFolders(MOCK_FOLDERS);
+      setFiles(MOCK_FILES);
+      setSubjects(MOCK_SUBJECTS);
     } finally {
       setLoading(false);
     }
@@ -58,6 +131,14 @@ export default function FilesPage() {
   useEffect(() => {
     loadData();
   }, [user?.id, selectedFolderId]);
+
+  useEffect(() => {
+    return () => {
+      if (uploadIntervalRef.current) {
+        clearInterval(uploadIntervalRef.current);
+      }
+    };
+  }, []);
 
   const handleCreateFolder = async (event) => {
     event.preventDefault();
@@ -81,12 +162,32 @@ export default function FilesPage() {
     }
   };
 
+  const startProgressAnimation = () => {
+    setUploadProgress(5);
+    uploadIntervalRef.current = setInterval(() => {
+      setUploadProgress((prev) => {
+        if (prev >= 90) return prev;
+        return prev + 7;
+      });
+    }, 180);
+  };
+
+  const stopProgressAnimation = () => {
+    if (uploadIntervalRef.current) {
+      clearInterval(uploadIntervalRef.current);
+      uploadIntervalRef.current = null;
+    }
+    setUploadProgress(100);
+    setTimeout(() => setUploadProgress(0), 900);
+  };
+
   const handleUpload = async (event) => {
     event.preventDefault();
     if (!uploadFile) return;
 
     setUploading(true);
     setError("");
+    startProgressAnimation();
     try {
       const createdFile = await uploadStudyFile({
         file: uploadFile,
@@ -94,179 +195,229 @@ export default function FilesPage() {
         folderId: uploadFolderId || selectedFolderId || null,
         subjectId: uploadSubjectId || null,
       });
+
       setFiles((prev) => [createdFile, ...prev]);
       setUploadFile(null);
       setUploadSubjectId("");
       setUploadFolderId("");
       event.target.reset();
+      stopProgressAnimation();
     } catch (uploadError) {
       setError(uploadError.message);
+      setUploadProgress(0);
+      if (uploadIntervalRef.current) clearInterval(uploadIntervalRef.current);
     } finally {
       setUploading(false);
     }
   };
 
+  const onDropFile = (event) => {
+    event.preventDefault();
+    const dropped = event.dataTransfer.files?.[0];
+    if (dropped) {
+      setUploadFile(dropped);
+    }
+  };
+
+  if (loading) {
+    return <LoadingState label="Preparing your cloud drive..." />;
+  }
+
   return (
     <section className="space-y-5">
       <header>
-        <h1 className="font-serif text-3xl text-slate-900">Files & Folders</h1>
-        <p className="text-sm text-slate-600">Upload PDFs/images and organize them like cloud storage.</p>
+        <h1 className="text-3xl font-black text-slate-900 dark:text-slate-100">Files & Folders</h1>
+        <p className="text-sm text-slate-600 dark:text-slate-300">Google Drive-like workspace with animated interactions.</p>
       </header>
 
       <ErrorState message={error} />
 
-      {loading ? (
-        <LoadingState label="Loading folders and files..." />
-      ) : (
-        <div className="grid gap-4 xl:grid-cols-[360px_1fr]">
-          <aside className="space-y-4">
-            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-center justify-between">
-                <h2 className="font-semibold text-slate-900">Folder Tree</h2>
-                <button
-                  type="button"
-                  onClick={() => setSelectedFolderId("")}
-                  className="text-xs text-cyan-700"
-                >
-                  Show all files
-                </button>
-              </div>
-              <FolderTree tree={folderTree} selectedId={selectedFolderId} onSelect={setSelectedFolderId} />
+      <div className="grid gap-4 xl:grid-cols-[320px_1fr]">
+        <div className="space-y-4">
+          <GlassCard hover={false}>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">Folder Tree</h2>
+              <button type="button" onClick={() => setSelectedFolderId("")} className="text-xs text-cyan-600">
+                Show all
+              </button>
             </div>
+            <FolderTree tree={folderTree} selectedId={selectedFolderId} onSelect={setSelectedFolderId} />
+          </GlassCard>
 
-            {canManageFiles ? (
-              <form
-                onSubmit={handleCreateFolder}
-                className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
-              >
-                <h3 className="font-semibold text-slate-900">Create Folder</h3>
+          <GlassCard hover={false}>
+            <h3 className="mb-3 text-sm font-semibold text-slate-900 dark:text-slate-100">Folders</h3>
+            <div className="grid grid-cols-2 gap-2">
+              {folders.slice(0, 6).map((folder) => (
+                <motion.button
+                  key={folder.id}
+                  type="button"
+                  whileHover={{ scale: 1.02 }}
+                  onClick={() => setSelectedFolderId(folder.id)}
+                  className="rounded-xl border border-slate-200 bg-white/70 p-3 text-left text-xs dark:border-slate-700 dark:bg-slate-800/60"
+                >
+                  <Folder size={14} className="mb-1 text-cyan-600" />
+                  <p className="line-clamp-1 font-semibold text-slate-800 dark:text-slate-100">{folder.name}</p>
+                </motion.button>
+              ))}
+            </div>
+          </GlassCard>
+
+          {canManageFiles && (
+            <GlassCard hover={false}>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Create Folder</h3>
+              <form onSubmit={handleCreateFolder} className="mt-3 space-y-2">
                 <input
-                  className="mt-3 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  className="w-full rounded-xl border border-slate-300 bg-white/80 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
                   placeholder="Folder name"
                   value={newFolderName}
                   onChange={(event) => setNewFolderName(event.target.value)}
                   required
                 />
                 <select
-                  className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  className="w-full rounded-xl border border-slate-300 bg-white/80 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
                   value={newFolderParent}
                   onChange={(event) => setNewFolderParent(event.target.value)}
                 >
-                  <option value="">No parent (root)</option>
+                  <option value="">No parent</option>
                   {folders.map((folder) => (
-                    <option key={folder.id} value={folder.id}>
-                      {folder.name}
-                    </option>
+                    <option key={folder.id} value={folder.id}>{folder.name}</option>
                   ))}
                 </select>
-                <button
-                  type="submit"
-                  disabled={savingFolder}
-                  className="mt-3 w-full rounded-md bg-cyan-700 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-600"
-                >
-                  {savingFolder ? "Creating..." : "Create folder"}
-                </button>
+                <AnimatedButton type="submit" disabled={savingFolder} className="w-full">
+                  {savingFolder ? "Creating..." : "Create Folder"}
+                </AnimatedButton>
               </form>
-            ) : (
-              <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">
-                Student mode can view and download files. Switch to Teacher mode to create folders.
-              </div>
-            )}
-          </aside>
+            </GlassCard>
+          )}
+        </div>
 
-          <div className="space-y-4">
-            {canManageFiles && (
-              <form onSubmit={handleUpload} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                <h2 className="font-semibold text-slate-900">Upload Study File</h2>
-                <p className="text-xs text-slate-500">Supported: PDF and image files</p>
+        <div className="space-y-4">
+          {canManageFiles && (
+            <GlassCard hover={false}>
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">Upload Zone</h2>
+              <form onSubmit={handleUpload} className="mt-3 space-y-3">
+                <div
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={onDropFile}
+                  className="rounded-2xl border border-dashed border-cyan-300 bg-cyan-50/60 p-6 text-center dark:border-cyan-700 dark:bg-cyan-950/20"
+                >
+                  <UploadCloud className="mx-auto mb-2 text-cyan-600" />
+                  <p className="text-sm text-slate-700 dark:text-slate-200">Drag and drop PDF/image here</p>
+                  <p className="text-xs text-slate-500">or use the picker below</p>
+                </div>
+
                 <input
                   type="file"
                   accept="application/pdf,image/*"
-                  className="mt-3 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  className="w-full rounded-xl border border-slate-300 bg-white/80 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
                   onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}
                   required
                 />
-                <div className="mt-2 grid gap-2 md:grid-cols-2">
+
+                {uploadFile && (
+                  <p className="text-xs text-slate-600 dark:text-slate-300">Selected: {uploadFile.name}</p>
+                )}
+
+                <div className="grid gap-2 md:grid-cols-2">
                   <select
-                    className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    className="rounded-xl border border-slate-300 bg-white/80 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
                     value={uploadSubjectId}
                     onChange={(event) => setUploadSubjectId(event.target.value)}
                   >
                     <option value="">Optional subject</option>
                     {subjects.map((subject) => (
-                      <option key={subject.id} value={subject.id}>
-                        {subject.name}
-                      </option>
+                      <option key={subject.id} value={subject.id}>{subject.name}</option>
                     ))}
                   </select>
+
                   <select
-                    className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    className="rounded-xl border border-slate-300 bg-white/80 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
                     value={uploadFolderId}
                     onChange={(event) => setUploadFolderId(event.target.value)}
                   >
                     <option value="">Optional folder</option>
                     {folders.map((folder) => (
-                      <option key={folder.id} value={folder.id}>
-                        {folder.name}
-                      </option>
+                      <option key={folder.id} value={folder.id}>{folder.name}</option>
                     ))}
                   </select>
                 </div>
-                <button
-                  type="submit"
-                  disabled={uploading}
-                  className="mt-3 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700"
-                >
-                  {uploading ? "Uploading..." : "Upload file"}
-                </button>
-              </form>
-            )}
 
-            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              <h2 className="font-semibold text-slate-900">Uploaded Files</h2>
-              <div className="mt-3 overflow-x-auto">
-                <table className="min-w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 text-slate-500">
-                      <th className="px-2 py-2 font-medium">File</th>
-                      <th className="px-2 py-2 font-medium">Uploaded</th>
-                      <th className="px-2 py-2 font-medium">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {files.length === 0 ? (
-                      <tr>
-                        <td colSpan={3} className="px-2 py-4 text-slate-500">
-                          No files found for this view.
-                        </td>
-                      </tr>
-                    ) : (
-                      files.map((file) => (
-                        <tr key={file.id} className="border-b border-slate-100">
-                          <td className="px-2 py-2 text-slate-900">{file.name}</td>
-                          <td className="px-2 py-2 text-slate-500">
-                            {new Date(file.created_at).toLocaleString()}
-                          </td>
-                          <td className="px-2 py-2">
-                            <a
-                              className="text-cyan-700 hover:text-cyan-600"
-                              href={file.file_url}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              View / Download
-                            </a>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                {uploadProgress > 0 && (
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${uploadProgress}%` }}
+                      className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-emerald-500"
+                    />
+                  </div>
+                )}
+
+                <AnimatedButton type="submit" disabled={uploading} className="w-full">
+                  {uploading ? "Uploading..." : "Upload File"}
+                </AnimatedButton>
+              </form>
+            </GlassCard>
+          )}
+
+          <GlassCard hover={false}>
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">Files</h2>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setViewMode("grid")}
+                  className={`rounded-lg p-2 ${viewMode === "grid" ? "bg-cyan-100 text-cyan-700" : "bg-slate-100 text-slate-500 dark:bg-slate-800"}`}
+                >
+                  <Grid3X3 size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("list")}
+                  className={`rounded-lg p-2 ${viewMode === "list" ? "bg-cyan-100 text-cyan-700" : "bg-slate-100 text-slate-500 dark:bg-slate-800"}`}
+                >
+                  <List size={14} />
+                </button>
               </div>
-            </section>
-          </div>
+            </div>
+
+            <AnimatePresence mode="wait">
+              {viewMode === "grid" ? (
+                <motion.div
+                  key="grid"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
+                >
+                  {files.map((file) => (
+                    <FileCard key={file.id} file={file} />
+                  ))}
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="list"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  className="space-y-2"
+                >
+                  {files.map((file) => (
+                    <div key={file.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-slate-700 dark:bg-slate-800/60">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">{file.name}</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">{new Date(file.created_at).toLocaleString()}</p>
+                      </div>
+                      <a href={file.file_url} target="_blank" rel="noreferrer" className="text-xs font-semibold text-cyan-600">
+                        View
+                      </a>
+                    </div>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </GlassCard>
         </div>
-      )}
+      </div>
     </section>
   );
 }

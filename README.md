@@ -1,32 +1,65 @@
-# AI Study Hub
+# EduVault
 
-A full-stack (serverless) study management app built with React + Vite + Tailwind CSS and Supabase for Auth, PostgreSQL, and Storage.
+A modern study workspace built with React + Vite + Tailwind CSS and powered by Supabase.
 
-## Features
+## What This App Includes
 
-- Supabase Auth: sign up, login, logout, session persistence
-- Protected routes for all app pages
-- Dashboard with total uploads, quiz attempts, subjects count
+- Authentication flow (sign up, login, logout, protected routes)
+- Teacher and student mode
+- Dashboard analytics and activity feed
 - Subject management
-- Nested folder system (Google Drive-like)
-- File upload to Supabase Storage bucket `study-files`
-- Quiz creation (MCQ), question management, and quiz attempts
-- Progress tracking with score history and recent activity
+- File manager with folders and uploads
+- Quiz creation, publishing, attempts, and score tracking
+- Animated UI, dark/light mode, and skeleton loading states
 
-## Stack
+## Core Technologies Used
 
-- React 19 + Vite
-- Tailwind CSS
-- Supabase (`@supabase/supabase-js`)
+- React 19
+- Vite 8
+- React Router DOM 7
+- Tailwind CSS 3
+- Framer Motion
+- Lucide React icons
+- Supabase JavaScript SDK (`@supabase/supabase-js`)
+
+## Supabase Services Used (Important)
+
+### 1) Supabase Authentication
+
+Authentication is used as the identity layer for the whole app:
+
+- Email/password sign up and login
+- Session persistence
+- Route protection (public vs protected pages)
+- User context for ownership-based data access
+
+### 2) Supabase Storage (Storage as a Service)
+
+Supabase Storage is used to store study files and deliver public file links:
+
+- Bucket used: `study-files`
+- Upload flow: client uploads file to storage bucket
+- App stores metadata in `files` table (`name`, `file_url`, `folder_id`, `subject_id`, `user_id`)
+- File manager page reads links and lets users open/download files
+
+This project heavily relies on Supabase Storage as a managed file service and Supabase Authentication for secure user identity.
+
+## Database and Policies
+
+- PostgreSQL tables + RLS policies are defined in [supabase/schema.sql](supabase/schema.sql)
+- Dual-mode additions are in [supabase/dual_mode_migration.sql](supabase/dual_mode_migration.sql)
 
 ## Project Structure
 
-```
+```text
 src/
 	components/
+		files/
 		folders/
 		layout/
+		quizzes/
 		shared/
+		subjects/
 	context/
 	lib/
 	pages/
@@ -35,9 +68,10 @@ src/
 	main.jsx
 supabase/
 	schema.sql
+	dual_mode_migration.sql
 ```
 
-## 1. Environment Variables
+## Environment Variables
 
 Create `.env.local` from `.env.example`:
 
@@ -46,38 +80,46 @@ VITE_SUPABASE_URL="https://your-project.supabase.co"
 VITE_SUPABASE_ANON_KEY="your-anon-key"
 ```
 
-`VITE_SUPABASE_PUBLISHABLE_KEY` is also supported for compatibility.
+Optional compatibility key:
 
-## 2. Supabase Setup
+```bash
+VITE_SUPABASE_PUBLISHABLE_KEY="your-anon-key"
+```
 
-1. Open your Supabase project.
-2. Go to SQL Editor and run `supabase/schema.sql`.
-3. Confirm a storage bucket named `study-files` exists.
-4. In Authentication, enable Email/Password provider.
+## Supabase Setup
 
-If you already ran an older version of the schema before dual mode support was added, run `supabase/dual_mode_migration.sql` once to add role and published-quiz policies.
+1. Create/open your Supabase project.
+2. In SQL Editor, run [supabase/schema.sql](supabase/schema.sql).
+3. If required for older setups, run [supabase/dual_mode_migration.sql](supabase/dual_mode_migration.sql).
+4. Enable Email/Password in Authentication providers.
+5. Create/confirm storage bucket `study-files`.
 
-## 3. Install and Run
+## Local Development
 
 ```bash
 npm install
 npm run dev
 ```
 
-Build for production:
+Production build:
 
 ```bash
 npm run build
 npm run preview
 ```
 
-## 4. Vercel Deployment
+## Deployment (Vercel)
 
-1. Push this repository to GitHub.
-2. Import the project in Vercel.
-3. Add environment variables in Vercel project settings:
+Live deployed link: [Add deployed link here]()
+
+1. Push the repo to GitHub.
+2. Import project into Vercel.
+3. Set environment variables:
 	 - `VITE_SUPABASE_URL`
 	 - `VITE_SUPABASE_ANON_KEY`
 4. Deploy.
 
-Vercel uses the default build command `npm run build` and output directory `dist` for Vite.
+Vercel defaults for this app:
+
+- Build command: `npm run build`
+- Output directory: `dist`

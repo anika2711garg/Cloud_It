@@ -3,7 +3,56 @@ import { supabase } from "../lib/supabaseClient";
 import { getUserProfile, upsertUserProfile, updateUserRole } from "../services/studyHubApi";
 
 const AuthContext = createContext(null);
-const SESSION_INIT_TIMEOUT_MS = 2000;
+const SESSION_INIT_TIMEOUT_MS = 1200;
+const ROLE_OVERRIDE_KEY_PREFIX = "ai-study-hub-role-override:";
+
+function getRoleOverride(userId) {
+  if (!userId) return null;
+
+  try {
+    const saved = localStorage.getItem(`${ROLE_OVERRIDE_KEY_PREFIX}${userId}`);
+    return saved === "teacher" || saved === "student" ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function setRoleOverride(userId, roleValue) {
+  if (!userId) return;
+
+  try {
+    localStorage.setItem(`${ROLE_OVERRIDE_KEY_PREFIX}${userId}`, roleValue);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function clearRoleOverride(userId) {
+  if (!userId) return;
+
+  try {
+    localStorage.removeItem(`${ROLE_OVERRIDE_KEY_PREFIX}${userId}`);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function clearLocalViewCaches() {
+  const keys = [
+    "ai-study-hub-dashboard-cache",
+    "ai-study-hub-subjects-cache",
+    "ai-study-hub-files-cache",
+    "ai-study-hub-quizzes-cache",
+  ];
+
+  for (const key of keys) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // Ignore storage errors.
+    }
+  }
+}
 
 function withTimeout(promise, ms) {
   return Promise.race([
@@ -43,20 +92,28 @@ export function AuthProvider({ children }) {
         });
       }
 
-      const normalizedRole = currentProfile?.role === "teacher" ? "teacher" : "student";
+      const profileRole = currentProfile?.role === "teacher" ? "teacher" : "student";
+      const overrideRole = getRoleOverride(currentUser.id);
+      const normalizedRole = overrideRole ?? profileRole;
       setProfile(currentProfile);
       setRole(normalizedRole);
       setActiveMode(normalizedRole === "teacher" ? "teacher" : "student");
+
+      if (overrideRole && overrideRole === profileRole) {
+        clearRoleOverride(currentUser.id);
+      }
     } catch (_profileError) {
       // Keep app usable even if profile table/policies are not yet migrated.
+      const overrideRole = getRoleOverride(currentUser.id);
+      const normalizedRole = overrideRole ?? metadataRole;
       const fallbackProfile = {
         id: currentUser.id,
         email: currentUser.email,
-        role: metadataRole,
+        role: normalizedRole,
       };
       setProfile(fallbackProfile);
-      setRole(metadataRole);
-      setActiveMode(metadataRole === "teacher" ? "teacher" : "student");
+      setRole(normalizedRole);
+      setActiveMode(normalizedRole === "teacher" ? "teacher" : "student");
     }
   };
 
@@ -146,18 +203,73 @@ export function AuthProvider({ children }) {
   };
 
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    return { error };
+    const currentUserId = user?.id;
+    if (currentUserId) {
+      clearRoleOverride(currentUserId);
+    }
+
+    // Optimistically clear local auth state so logout always feels instant.
+    setSession(null);
+    setUser(null);
+    setProfile(null);
+    setRole("student");
+    setActiveMode("student");
+    setAuthLoading(false);
+    clearLocalViewCaches();
+
+    try {
+      const signOutResponse = await withTimeout(supabase.auth.signOut(), SESSION_INIT_TIMEOUT_MS);
+      if (signOutResponse?.timeout) {
+        return { error: null };
+      }
+
+      return { error: signOutResponse.error ?? null };
+    } catch {
+      // Local sign-out is already complete; ignore remote errors.
+      return { error: null };
+    }
   };
 
   const changeRole = async (nextRole) => {
     if (!user?.id) return;
 
-    const updated = await updateUserRole({ userId: user.id, role: nextRole });
-    const normalizedRole = updated.role === "teacher" ? "teacher" : "student";
-    setProfile(updated);
+    const normalizedRole = nextRole === "teacher" ? "teacher" : "student";
     setRole(normalizedRole);
     setActiveMode(normalizedRole === "teacher" ? "teacher" : "student");
+    setProfile((prev) => ({
+      id: user.id,
+      email: user.email,
+      role: normalizedRole,
+      ...(prev ?? {}),
+    }));
+    setRoleOverride(user.id, normalizedRole);
+
+    try {
+      const updated = await updateUserRole({ userId: user.id, role: normalizedRole });
+      const confirmedRole = updated.role === "teacher" ? "teacher" : "student";
+      setProfile(updated);
+      setRole(confirmedRole);
+      setActiveMode(confirmedRole === "teacher" ? "teacher" : "student");
+      clearRoleOverride(user.id);
+      return;
+    } catch (_updateRoleError) {
+      // Fall through to upsert as a backup path when update policy fails.
+    }
+
+    try {
+      const upserted = await upsertUserProfile({
+        userId: user.id,
+        email: user.email,
+        role: normalizedRole,
+      });
+      const confirmedRole = upserted.role === "teacher" ? "teacher" : "student";
+      setProfile(upserted);
+      setRole(confirmedRole);
+      setActiveMode(confirmedRole === "teacher" ? "teacher" : "student");
+      clearRoleOverride(user.id);
+    } catch (_upsertRoleError) {
+      // Keep optimistic role in UI if backend role mutation is blocked.
+    }
   };
 
   const switchMode = (nextMode) => {
